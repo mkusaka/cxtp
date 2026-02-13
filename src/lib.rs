@@ -167,6 +167,8 @@ fn set_project_trust_level_inner(
                     if let Some(inner_table) = value.as_inline_table() {
                         let new_table = inner_table.clone().into_table();
                         projects_table.insert(key, Item::Table(new_table));
+                    } else {
+                        projects_table.insert(key, Item::Value(value.clone()));
                     }
                 }
             }
@@ -262,6 +264,27 @@ projects = { "/tmp/existing" = { trust_level = "trusted" } }
             Some("trusted")
         );
         assert!(doc["projects"]["/tmp/existing"].is_table());
+    }
+
+    #[test]
+    fn upsert_migrates_inline_projects_table_without_dropping_non_table_items() {
+        let project = Path::new("/tmp/new-worktree");
+        let input = r#"
+projects = { "/tmp/existing" = { trust_level = "trusted" }, note = "keep" }
+"#;
+        let output = upsert_project_trust(input, project, TrustLevel::Trusted).unwrap();
+        let doc = output.parse::<DocumentMut>().unwrap();
+        let new_key = project.to_string_lossy().to_string();
+
+        assert_eq!(doc["projects"]["note"].as_str(), Some("keep"));
+        assert_eq!(
+            doc["projects"]["/tmp/existing"]["trust_level"].as_str(),
+            Some("trusted")
+        );
+        assert_eq!(
+            doc["projects"][new_key.as_str()]["trust_level"].as_str(),
+            Some("trusted")
+        );
     }
 
     #[test]
