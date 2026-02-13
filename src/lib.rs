@@ -112,12 +112,16 @@ fn resolve_codex_home_env_path(env_path: PathBuf) -> Result<PathBuf> {
 }
 
 pub fn canonicalize_project_dir(project_dir: &Path) -> Result<PathBuf> {
-    fs::canonicalize(project_dir).with_context(|| {
+    let canonical = fs::canonicalize(project_dir).with_context(|| {
         format!(
             "failed to canonicalize project directory: {}",
             project_dir.display()
         )
-    })
+    })?;
+    if !canonical.is_dir() {
+        anyhow::bail!("project path must be a directory: {}", canonical.display());
+    }
+    Ok(canonical)
 }
 
 pub fn upsert_project_trust(
@@ -320,5 +324,23 @@ projects = { "/tmp/existing" = { trust_level = "trusted" }, note = "keep" }
 
         let resolved = resolve_codex_home_env_path(candidate.clone()).unwrap();
         assert_eq!(resolved, candidate);
+    }
+
+    #[test]
+    fn canonicalize_project_dir_rejects_file_path() {
+        let file_path = std::env::temp_dir().join(format!(
+            "cxtp-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&file_path, "test").unwrap();
+
+        let err = canonicalize_project_dir(&file_path).unwrap_err();
+        assert!(err.to_string().contains("project path must be a directory"));
+
+        let _ = std::fs::remove_file(file_path);
     }
 }
