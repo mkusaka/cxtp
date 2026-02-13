@@ -4,10 +4,10 @@ use std::fmt::Display;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use toml_edit::value;
 use toml_edit::DocumentMut;
 use toml_edit::Item;
 use toml_edit::Table;
+use toml_edit::value;
 
 const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -200,7 +200,7 @@ fn set_project_trust_level_inner(
         .get_mut(project_key.as_str())
         .and_then(Item::as_table_mut)
     else {
-        anyhow::bail!("project table missing for {}", project_key);
+        anyhow::bail!("project table missing for {project_key}");
     };
     project_table.set_implicit(false);
     project_table["trust_level"] = value(trust_level.to_string());
