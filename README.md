@@ -20,6 +20,13 @@ This tool provides a safe, scriptable way to manage that setting with:
 
 ## Installation
 
+### Install to Cargo bin directory
+
+```bash
+cargo install --path .
+cxtp --help
+```
+
 ### Build from source
 
 ```bash
