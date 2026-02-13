@@ -82,23 +82,33 @@ pub fn resolve_codex_home(codex_home_override: Option<&Path>) -> Result<PathBuf>
 
     if let Some(codex_home_env) = std::env::var_os("CODEX_HOME") {
         let env_path = PathBuf::from(codex_home_env);
-        let canonical = fs::canonicalize(&env_path).with_context(|| {
-            format!(
-                "CODEX_HOME must point to an existing directory: {}",
-                env_path.display()
-            )
-        })?;
-        if !canonical.is_dir() {
-            anyhow::bail!(
-                "CODEX_HOME must point to a directory: {}",
-                canonical.display()
-            );
-        }
-        return Ok(canonical);
+        return resolve_codex_home_env_path(env_path);
     }
 
     let home = dirs::home_dir().context("failed to resolve home directory")?;
     Ok(home.join(".codex"))
+}
+
+fn resolve_codex_home_env_path(env_path: PathBuf) -> Result<PathBuf> {
+    match fs::metadata(&env_path) {
+        Ok(metadata) => {
+            if !metadata.is_dir() {
+                anyhow::bail!(
+                    "CODEX_HOME must point to a directory: {}",
+                    env_path.display()
+                );
+            }
+            fs::canonicalize(&env_path).with_context(|| {
+                format!(
+                    "failed to canonicalize CODEX_HOME path: {}",
+                    env_path.display()
+                )
+            })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(env_path),
+        Err(err) => Err(err)
+            .with_context(|| format!("failed to access CODEX_HOME path: {}", env_path.display())),
+    }
 }
 
 pub fn canonicalize_project_dir(project_dir: &Path) -> Result<PathBuf> {
@@ -169,12 +179,20 @@ fn set_project_trust_level_inner(
         anyhow::bail!("projects table missing after initialization");
     };
 
-    let needs_project_table = !projects_table.contains_key(project_key.as_str())
-        || projects_table
-            .get(project_key.as_str())
-            .and_then(Item::as_table)
-            .is_none();
-    if needs_project_table {
+    if !projects_table.contains_key(project_key.as_str()) {
+        projects_table.insert(project_key.as_str(), toml_edit::table());
+    } else if let Some(inline_table) = projects_table
+        .get(project_key.as_str())
+        .and_then(Item::as_inline_table)
+        .cloned()
+    {
+        // Preserve existing keys when migrating per-project inline table entries.
+        projects_table.insert(project_key.as_str(), Item::Table(inline_table.into_table()));
+    } else if projects_table
+        .get(project_key.as_str())
+        .and_then(Item::as_table)
+        .is_none()
+    {
         projects_table.insert(project_key.as_str(), toml_edit::table());
     }
 
@@ -244,5 +262,40 @@ projects = { "/tmp/existing" = { trust_level = "trusted" } }
             Some("trusted")
         );
         assert!(doc["projects"]["/tmp/existing"].is_table());
+    }
+
+    #[test]
+    fn upsert_preserves_keys_for_existing_inline_project_entry() {
+        let project = Path::new("/tmp/example-project");
+        let input = r#"
+[projects]
+"/tmp/example-project" = { trust_level = "trusted", extra = "x" }
+"#;
+        let output = upsert_project_trust(input, project, TrustLevel::Untrusted).unwrap();
+        let doc = output.parse::<DocumentMut>().unwrap();
+        let key = project.to_string_lossy().to_string();
+
+        assert_eq!(
+            doc["projects"][key.as_str()]["trust_level"].as_str(),
+            Some("untrusted")
+        );
+        assert_eq!(doc["projects"][key.as_str()]["extra"].as_str(), Some("x"));
+        assert!(doc["projects"][key.as_str()].is_table());
+    }
+
+    #[test]
+    fn resolve_codex_home_env_path_accepts_nonexistent_directory() {
+        let candidate = std::env::temp_dir().join(format!(
+            "cxtp-nonexistent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!candidate.exists());
+
+        let resolved = resolve_codex_home_env_path(candidate.clone()).unwrap();
+        assert_eq!(resolved, candidate);
     }
 }
