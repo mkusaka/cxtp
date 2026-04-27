@@ -217,11 +217,69 @@ fn set_project_trust_level_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toml_edit::InlineTable;
+    use toml_edit::Value;
+
+    fn abs_test_path(name: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!(r"C:\tmp\{name}"))
+        } else {
+            PathBuf::from(format!("/tmp/{name}"))
+        }
+    }
+
+    fn build_input_with_table_project(project_key: &str, entries: &[(&str, &str)]) -> String {
+        let mut doc = DocumentMut::new();
+        let mut projects = Table::new();
+        let mut project = Table::new();
+        for (k, v) in entries {
+            project[*k] = value(*v);
+        }
+        projects.insert(project_key, Item::Table(project));
+        doc.as_table_mut().insert("projects", Item::Table(projects));
+        doc.to_string()
+    }
+
+    fn build_input_with_inline_projects(
+        project_entries: &[(&str, &[(&str, &str)])],
+        scalar_entries: &[(&str, &str)],
+    ) -> String {
+        let mut doc = DocumentMut::new();
+        let mut projects = InlineTable::new();
+        for (key, entries) in project_entries {
+            let mut inline = InlineTable::new();
+            for (k, v) in *entries {
+                inline.insert(*k, Value::from(*v));
+            }
+            projects.insert(*key, Value::InlineTable(inline));
+        }
+        for (k, v) in scalar_entries {
+            projects.insert(*k, Value::from(*v));
+        }
+        doc.as_table_mut()
+            .insert("projects", Item::Value(Value::InlineTable(projects)));
+        doc.to_string()
+    }
+
+    fn build_input_with_inline_project_entry(
+        project_key: &str,
+        entries: &[(&str, &str)],
+    ) -> String {
+        let mut doc = DocumentMut::new();
+        let mut projects = Table::new();
+        let mut inline = InlineTable::new();
+        for (k, v) in entries {
+            inline.insert(*k, Value::from(*v));
+        }
+        projects.insert(project_key, Item::Value(Value::InlineTable(inline)));
+        doc.as_table_mut().insert("projects", Item::Table(projects));
+        doc.to_string()
+    }
 
     #[test]
     fn upsert_creates_project_table_on_empty_config() {
-        let project = Path::new("/tmp/example-project");
-        let output = upsert_project_trust("", project, TrustLevel::Trusted).unwrap();
+        let project = abs_test_path("example-project");
+        let output = upsert_project_trust("", &project, TrustLevel::Trusted).unwrap();
         let doc = output.parse::<DocumentMut>().unwrap();
         let key = project.to_string_lossy().to_string();
 
@@ -234,14 +292,12 @@ mod tests {
 
     #[test]
     fn upsert_updates_existing_project() {
-        let project = Path::new("/tmp/example-project");
-        let input = r#"
-[projects."/tmp/example-project"]
-trust_level = "trusted"
-"#;
-        let output = upsert_project_trust(input, project, TrustLevel::Untrusted).unwrap();
-        let doc = output.parse::<DocumentMut>().unwrap();
+        let project = abs_test_path("example-project");
         let key = project.to_string_lossy().to_string();
+        let input = build_input_with_table_project(&key, &[("trust_level", "trusted")]);
+
+        let output = upsert_project_trust(&input, &project, TrustLevel::Untrusted).unwrap();
+        let doc = output.parse::<DocumentMut>().unwrap();
 
         assert_eq!(
             doc["projects"][key.as_str()]["trust_level"].as_str(),
@@ -251,38 +307,50 @@ trust_level = "trusted"
 
     #[test]
     fn upsert_migrates_inline_projects_table() {
-        let project = Path::new("/tmp/new-worktree");
-        let input = r#"
-projects = { "/tmp/existing" = { trust_level = "trusted" } }
-"#;
-        let output = upsert_project_trust(input, project, TrustLevel::Trusted).unwrap();
+        let project = abs_test_path("new-worktree");
+        let existing_key = if cfg!(windows) {
+            r"C:\tmp\existing"
+        } else {
+            "/tmp/existing"
+        };
+        let input =
+            build_input_with_inline_projects(&[(existing_key, &[("trust_level", "trusted")])], &[]);
+
+        let output = upsert_project_trust(&input, &project, TrustLevel::Trusted).unwrap();
         let doc = output.parse::<DocumentMut>().unwrap();
         let new_key = project.to_string_lossy().to_string();
 
         assert_eq!(
-            doc["projects"]["/tmp/existing"]["trust_level"].as_str(),
+            doc["projects"][existing_key]["trust_level"].as_str(),
             Some("trusted")
         );
         assert_eq!(
             doc["projects"][new_key.as_str()]["trust_level"].as_str(),
             Some("trusted")
         );
-        assert!(doc["projects"]["/tmp/existing"].is_table());
+        assert!(doc["projects"][existing_key].is_table());
     }
 
     #[test]
     fn upsert_migrates_inline_projects_table_without_dropping_non_table_items() {
-        let project = Path::new("/tmp/new-worktree");
-        let input = r#"
-projects = { "/tmp/existing" = { trust_level = "trusted" }, note = "keep" }
-"#;
-        let output = upsert_project_trust(input, project, TrustLevel::Trusted).unwrap();
+        let project = abs_test_path("new-worktree");
+        let existing_key = if cfg!(windows) {
+            r"C:\tmp\existing"
+        } else {
+            "/tmp/existing"
+        };
+        let input = build_input_with_inline_projects(
+            &[(existing_key, &[("trust_level", "trusted")])],
+            &[("note", "keep")],
+        );
+
+        let output = upsert_project_trust(&input, &project, TrustLevel::Trusted).unwrap();
         let doc = output.parse::<DocumentMut>().unwrap();
         let new_key = project.to_string_lossy().to_string();
 
         assert_eq!(doc["projects"]["note"].as_str(), Some("keep"));
         assert_eq!(
-            doc["projects"]["/tmp/existing"]["trust_level"].as_str(),
+            doc["projects"][existing_key]["trust_level"].as_str(),
             Some("trusted")
         );
         assert_eq!(
@@ -293,14 +361,15 @@ projects = { "/tmp/existing" = { trust_level = "trusted" }, note = "keep" }
 
     #[test]
     fn upsert_preserves_keys_for_existing_inline_project_entry() {
-        let project = Path::new("/tmp/example-project");
-        let input = r#"
-[projects]
-"/tmp/example-project" = { trust_level = "trusted", extra = "x" }
-"#;
-        let output = upsert_project_trust(input, project, TrustLevel::Untrusted).unwrap();
-        let doc = output.parse::<DocumentMut>().unwrap();
+        let project = abs_test_path("example-project");
         let key = project.to_string_lossy().to_string();
+        let input = build_input_with_inline_project_entry(
+            &key,
+            &[("trust_level", "trusted"), ("extra", "x")],
+        );
+
+        let output = upsert_project_trust(&input, &project, TrustLevel::Untrusted).unwrap();
+        let doc = output.parse::<DocumentMut>().unwrap();
 
         assert_eq!(
             doc["projects"][key.as_str()]["trust_level"].as_str(),
